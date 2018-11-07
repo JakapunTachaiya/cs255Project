@@ -1,0 +1,722 @@
+import os
+import sys
+import time
+import re
+import json
+import csv
+import pandas as pd
+import numpy as np
+import scipy.stats as sc
+import re
+from numpy import inf
+from collections import Counter
+import itertools
+import copy
+import datetime
+from bs4 import BeautifulSoup
+from numpy import median
+from nltk.stem.snowball import SnowballStemmer
+from nltk.corpus import stopwords
+import string
+from scipy.sparse import coo_matrix, vstack
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_selection import f_regression, chi2
+from sklearn.feature_selection import SelectKBest,mutual_info_classif
+from sklearn.model_selection import KFold
+from sklearn.model_selection import train_test_split
+from sklearn import linear_model
+from sklearn import metrics
+from sklearn.model_selection import cross_val_score, cross_val_predict
+from sklearn.naive_bayes import GaussianNB
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import make_moons, make_circles, make_classification
+from sklearn.neural_network import MLPClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn import svm
+from sklearn.svm import SVC
+from sklearn.gaussian_process import GaussianProcessClassifier
+from sklearn.gaussian_process.kernels import RBF
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_auc_score
+
+
+#username,uid,pid,tid,pcontent,pnumber,pdate,ptime,new_pcontent
+_offPostPath = "data/offcomm_post_Since_2013_test.csv"
+#tid,fid,username,uid,tview,url,lastposttime,title,replies
+_offThreadPath= "data/offcomm_thread.csv"
+
+
+#username,title,pid,tid,pcontent,pdate,pupdate,pnumber,new_pcontent
+_wilderPostPath = "data/wilder_post_Since_2013.csv"
+#tid,username,tview,url,lastposttime,sticky,title,replies,createtime
+_wilderThreadPath = "data/wilder_thread.csv"
+
+_offURLPath = "data/offCommURL_label.txt"
+_wilderURLPath = "data/wilderURL_lebel.txt"
+
+
+
+
+def findURLInString(string):
+    regex = re.compile('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]| [! * \(\),]| (?: %[0-9a-fA-F][0-9a-fA-F]))+')
+    url0 = regex.findall(string)
+    url1 = []
+
+    for idx in range(0,len(url0)):
+        eachURL = url0[idx]
+        regex2 = re.compile(r'(?:</[a-zA-Z]>+|\[/[a-zA-Z]+\]|</code>|<strong>|<img|\[img\]|</span>)')
+        regex3 = re.compile(r'(?:\\|<br)')
+        eachURL = regex2.split(eachURL)[0]
+        eachURL = regex3.split(eachURL)[0]
+
+        tailURL = re.sub(r'\W+', '', eachURL)
+        tailURL = re.sub(r'(?:httpwww|http|www|span)', '', tailURL)
+
+        regex4 = re.compile(r'(?:\.pdf$|\.png$|\.PNG$|\.jpg$|\.gif$)')
+        booleanFileType = regex4.search(eachURL)
+        if len(tailURL)>3 and not booleanFileType:
+            url1.append(eachURL)
+
+    return url1
+
+def findURL(pandasData):
+    testContent = pandasData["pcontent"].values
+    testTid = pandasData["tid"].values
+    testPid = pandasData["pid"].values
+    testUid = pandasData["uid"].values
+    # testUid = pandasData["username"].values
+
+    resultTid = []
+    resultPid = []
+    resultURL = []
+    resultUid = []
+
+    for eachIdx in range(0, len(testContent)):
+        result = findURLInString(testContent[eachIdx])
+        if result:
+            resultTid.append(testTid[eachIdx])
+            resultPid.append(testPid[eachIdx])
+            resultURL.append(result)
+            resultUid.append(testUid[eachIdx])
+
+    return (resultURL,resultTid,resultPid,resultUid)
+
+
+def readFile(filename):
+    filePD = pd.read_csv(filename)
+    return filePD
+
+def getThreadUserEntropyList(postData):
+    allTid = set(postData['tid'].values)
+    result = {}
+    for eachid in allTid:
+        # eachResult = []
+        selected = postData.loc[(postData['tid'] == eachid)]
+        uidList = selected['uid'].values
+        # uidList = selected['username'].values
+
+        allUidInThread = list(uidList)
+        count = Counter(allUidInThread).values()
+        sumVal = sum(count)
+        prob = [float(eachCount)/sumVal for eachCount in count]
+        entropy = sc.entropy(prob)
+        # eachResult.append(entropy)
+        result[eachid] = entropy
+        # result.append(eachResult)
+
+    return result
+
+def getDayEntropyList(postData):
+    allDate = set(postData['pdate'].values)
+    result = {}
+    for eachDay in allDate:
+        # eachResult = []
+        selected = postData.loc[(postData['pdate'] == eachDay)]
+        pidList = selected['pid'].values
+        # eachResult.append(eachDay)
+
+        allPidInThread = list(pidList)
+        count = Counter(allPidInThread).values()
+        sumVal = sum(count)
+        prob = [float(eachCount) / sumVal for eachCount in count]
+        entropy = sc.entropy(prob)
+        # eachResult.append(entropy)
+        result[eachDay] =  entropy
+    return result
+
+def getDateFeature(dateList):
+    dateObjList = []
+    for each in dateList:
+        dateObjList.append(datetime.datetime.strptime(each, '%Y-%m-%d'))
+
+    earliestDate = min(dateObjList)
+    latestDate = max(dateObjList)
+    now = datetime.datetime.today()
+
+    numActiveDay = (now-earliestDate).days
+    activeLifeTime = (latestDate-earliestDate).days
+
+    return (numActiveDay,activeLifeTime)
+
+def getUserPostFeature(allPosts):
+    result =[]
+    postLenth = []
+    for each in allPosts:
+        # print(each)
+        htmlTextTag = each[1:len(each)-1]
+        # print(htmlTextTag)
+        soup = BeautifulSoup(htmlTextTag)
+        unprocessedtext = soup.get_text()
+        postLenth.append(len((unprocessedtext).encode('utf-8')))
+
+    maxPost = max(postLenth)
+    avgPost = float(sum(postLenth))/len(postLenth)
+    medPost = median(postLenth)
+    return (avgPost,medPost,maxPost)
+
+def getAvgEntropy(entropyDict,selectedId):
+    tmpList =[]
+
+    for each in selectedId:
+        tmpVal = entropyDict[each]
+        tmpList.append(tmpVal)
+
+    avgResult = float(sum(tmpList)) / len(tmpList)
+
+    return avgResult
+
+
+
+def getUserFeature(postData, threadData,userIDList):
+    resultDict = {}
+
+
+    threadEntropy = getThreadUserEntropyList(postData)
+    dayEntropy = getDayEntropyList(postData)
+
+    for eachUserId in userIDList:
+
+        featureList = []
+        selectedPostFromUser = postData.loc[(postData['uid'] == eachUserId)]
+        # selectedPostFromUser =  postData[postData['username'].str.match(eachUserId)]
+
+
+        totalPost = set(selectedPostFromUser['pid'].values)
+        totalThread = set(selectedPostFromUser['tid'].values)
+        numTotalPost = len(totalPost)
+        numTotalthread = len(totalThread)
+
+        selectedThreadFromUser =threadData.loc[(threadData['uid'] == eachUserId)]
+        # selectedThreadFromUser = threadData[threadData['username'].str.match(eachUserId)]
+
+        numIniThread = len(set(selectedThreadFromUser['tid'].values))
+        avgThreadEntro = getAvgEntropy(threadEntropy,totalThread)
+
+
+        #date Features
+        allDateOfUser = selectedPostFromUser['pdate'].values
+        dateFeature = getDateFeature(set(allDateOfUser))
+        numActiveDay = dateFeature[0]
+        activeLifeTime = dateFeature[1]
+        avgDayEntro = getAvgEntropy(dayEntropy,allDateOfUser)
+
+        #post Features
+        allUsersPost = selectedPostFromUser['pcontent'].values
+        postFeatures = getUserPostFeature(allUsersPost)
+        avgPost =postFeatures[0]
+        medPost =postFeatures[1]
+        maxPost=postFeatures[2]
+
+        featureList.append(numTotalPost)
+        featureList.append(numTotalthread)
+        featureList.append(numIniThread)
+        featureList.append(avgThreadEntro)
+        featureList.append(numActiveDay)
+        featureList.append(avgDayEntro)
+        featureList.append(activeLifeTime)
+        featureList.append(avgPost)
+        featureList.append(medPost)
+        featureList.append(maxPost)
+        resultDict[eachUserId] = featureList
+
+        # print("UserId:",eachUserId ," Post: ", numTotalPost, " thread: ",numTotalthread)
+        # print("eachUserId: ",eachUserId, " numPost: " ,len(selectedPostFromUser['pid'].values),selectedPostFromUser['pid'].values)
+
+        userFeaturesLabel = ['numTotalPost','numTotalthread','numIniThread','avgThreadEntro','numActiveDay','avgDayEntro',
+                         'activeLifeTime','avgLenPost','medLenPost','maxLenPost']
+    return (resultDict,userFeaturesLabel)
+
+
+
+def getURLStringFeatures(urlString):
+    result = []
+
+    urlLength = len(urlString)
+    numBackslash = urlString.count('/')
+    booleanWWW = 'www' in urlString
+
+    classPrefix = 0
+    if 'http:' in urlString:
+        classPrefix = 0
+    elif 'https:' in urlString:
+        classPrefix = 1
+    else:
+        classPrefix = 2
+
+    numUpperCase = sum(1 for c in urlString if c.isupper())
+    normalizedUpperCase = float(numUpperCase)/urlLength
+
+    numNumbers = sum(c.isdigit() for c in urlString)
+    normalizedNumbers = float(numNumbers) / urlLength
+
+    result.append(urlLength)
+    result.append(numBackslash)
+    result.append(booleanWWW)
+    result.append(classPrefix)
+    result.append(normalizedUpperCase)
+    result.append(normalizedNumbers)
+
+    # print(urlString,result)
+
+
+    return result
+
+def getTFIDFFeature(postData,relatedPid):
+
+    # selected =  postData[postData['pid'].isin(relatedPid)]
+    postContent = postData["pcontent"].values
+    pid = postData["pid"].values
+
+    corpus = []
+    for each in postContent:
+        soup = BeautifulSoup(each)
+        unprocessedtext = soup.get_text().encode('utf-8')
+
+        removeTab =  re.sub('[\\n\\t\s]', ' ', unprocessedtext)
+        removeTab =  re.sub(r'\s+', ' ', removeTab).replace('\n','')
+        removeTab2 = removeTab.replace('\\n','').replace('\\t','').strip()
+
+        printable = set(string.printable)
+        removeNonAsci = filter(lambda x: x in printable, removeTab2)
+
+        stemmer = SnowballStemmer("english")
+        stemmed = stemmer.stem(removeNonAsci)
+        corpus.append(stemmed)
+
+    vectorizer = TfidfVectorizer(min_df=1,analyzer='word', stop_words='english')
+    tfIdfMat = vectorizer.fit_transform(corpus)
+    idf = vectorizer.idf_
+    idfDict = dict(zip(vectorizer.get_feature_names(), idf))
+    #
+    # print(len(pid))
+    # print(len(corpus))
+    # print(tfIdfMat.shape)
+
+    feature_names = vectorizer.get_feature_names()
+
+    # to print TFIDF for each doc
+    # doc = 0
+    # feature_index = tfIdfMat[doc, :].nonzero()[1]
+    # tfidf_scores = zip(feature_index, [tfIdfMat[doc, x] for x in feature_index])
+    # for w, s in [(feature_names[i], s) for (i, s) in tfidf_scores]:
+    #     print w, s
+
+
+
+    # resultDf = pd.DataFrame(columns=['pid','tfidf'])
+    # for idx in range(0,len(tfIdfMat)):
+    #     selectedPid = pid[idx]
+    #     eachTFIDF = tfIdfMat[idx]
+    #     resultDf.loc[len(resultDf)] = [selectedPid,]
+    # print(resultDf)
+
+    result = {}
+
+
+    tmpCount =0
+    for row in tfIdfMat:
+        selectedPid = pid[tmpCount]
+        result[selectedPid] =row
+        tmpCount =tmpCount+1
+
+    # tfIdfMat = tfIdfMat.toarray()
+    #
+    #
+    # for idx in range(0, len(tfIdfMat)):
+    #     selectedPid = pid[idx]
+    #     result[selectedPid] = tfIdfMat[idx]
+    # # print result
+
+
+    return (result,feature_names,idfDict,tfIdfMat)
+
+
+def createVectorFeature(postData, threadData,URLlabel):
+    findURLResult = findURL(postData)
+
+    resultURL = findURLResult[0]
+    resultTid = findURLResult[1]
+    resultPid = findURLResult[2]
+    resultUid = findURLResult[3]
+
+    concatList = []
+    concatListDescription = ['url','tid','pid','uid','count']
+    # concatListDescription = ['url', 'tid', 'pid', 'username', 'count']
+    urlStringFeatureLabel = ['urlLength', 'numBackslash', 'booleanWWW', 'classPrefix', 'normalizedUpperCase',
+                             'normalizedNumbers']
+    for idx in range(0,len(resultTid)):
+        for eachURl in resultURL[idx]:
+            eachRow = []
+            eachRow.append(eachURl)
+            eachRow.append(str(resultTid[idx]))
+            eachRow.append(str(resultPid[idx]))
+            eachRow.append(str(resultUid[idx]))
+            concatList.append(eachRow)
+
+    # print(len(concatList))
+    # print(concatList)
+
+    count = Counter(map(tuple, concatList))
+    concatList = []
+    for k, v in count.iteritems():
+        mergeList = []
+        tmpcount = list(str(v))
+        mergeList.extend(list(k))
+        mergeList.extend(tmpcount)
+        concatList.append(mergeList)
+
+    # print(concatList)
+
+    #get all unique pid from concatList
+    relatedPid = sorted([row[2] for row in concatList])
+    relatedPid = list(set(map(int,relatedPid)))
+
+    relatedUid = sorted([row[3] for row in concatList])
+    relatedUid = list(set(map(int,relatedUid)))
+    # relatedUid = list(set( relatedUid))
+
+    #get all unique url from concatList
+    relatedURL = sorted([row[0] for row in concatList])
+    relatedURL = list(set(relatedURL))
+    # print(relatedURL)
+
+    print("---getting userFeatures---")
+    (UserFeatureDict, userFeaturesLabel) = getUserFeature(postData, threadData, relatedUid)
+
+
+    #add USLStringFeature & UserFeature
+    for each in concatList:
+        eachURL = each[0]
+        uid =  int(each[3])
+        # uid = each[3]
+        eachURLStringFeatures = getURLStringFeatures(eachURL)
+        each.extend(eachURLStringFeatures)
+        eachUserFeature = UserFeatureDict[uid]
+        each.extend(eachUserFeature)
+
+
+    #add label
+    for each in concatList:
+        eachURL = each[0]
+        label = -1
+        if eachURL in URLlabel:
+            label = URLlabel[eachURL]
+        else:
+            label = -1
+        each.append(label)
+
+
+
+    concatListDescription.extend(urlStringFeatureLabel)
+    concatListDescription.extend(userFeaturesLabel)
+    concatListDescription.append("label")
+
+    #remove some outlier
+    concatList2 = []
+    # print(len(concatListDescription))
+    for each in concatList:
+        if len(each) == len(concatListDescription):
+            concatList2.append(each)
+
+
+    df = pd.DataFrame(concatList2, columns= concatListDescription)
+    df = df[df['label'] !=-1]
+
+    print("---getting IFIDFFeatures---")
+    # print(df)
+    TFIDFdict, feature_names,idfDict,tfIdfMat= getTFIDFFeature(postData,relatedPid)
+
+    pid = df['pid'].values
+    label = df['label'].values
+
+
+    eachPid = int(pid[0])
+    eachtfidf = TFIDFdict[eachPid]
+    relatedTFIDF = eachtfidf
+
+    for idx in range(1,len(pid)):
+        eachPid = int(pid[idx])
+        eachtfidf = TFIDFdict[eachPid]
+
+        eachtfidf.data = np.nan_to_num(eachtfidf.data)
+        relatedTFIDF = vstack([relatedTFIDF, eachtfidf])
+
+
+    # relatedTFIDFArray =  np.array(relatedTFIDF)
+    relatedTFIDFArray = relatedTFIDF
+
+    # print("TFIDF SHAPE ", relatedTFIDFArray.shape )
+    # # showTOP MEAN TFIDF FOR words
+    # topDFS = top_feats_by_class(tfIdfMat,label,feature_names,min_tfidf=0.1, top_n=30)
+    # print(topDFS)
+    # plot_tfidf_classfeats_h(topDFS)
+
+
+    ch2 = SelectKBest(chi2, k=100)
+    X_train_features = ch2.fit_transform(relatedTFIDFArray, label)
+
+    Select_feature_names = [feature_names[i] for i in ch2.get_support(indices=True)]
+
+    tfidfDF = pd.DataFrame(X_train_features.todense(), columns=Select_feature_names)
+
+    newdf = df.join(tfidfDF)
+
+    # print(list(newdf.columns.values))
+
+    # newdf = df
+    # Select_feature_names = 0
+
+    return newdf,Select_feature_names
+
+
+def readLabel(path):
+    result= {}
+
+    with open(path) as f:
+        content = f.read().splitlines()
+
+    for line in content:
+        eachResult = []
+        split = line.split(",virusratio[")
+        url = split[0]
+        split2 = split[1].split("],virusLink[")
+        ratio = split2[0]
+        if not ("{}") in ratio:
+            front = int(ratio.split("/")[0])
+            if front >= 1:
+                front = 1
+            # eachResult.append(url)
+            # eachResult.append(front)
+            result[url] = front
+
+    return result
+
+def roundList(resultList):
+
+    for eachIdx in range(0,len(resultList)):
+        if resultList[eachIdx] >=0.5:
+            resultList[eachIdx] = 1
+        else:
+            resultList[eachIdx] = 0
+
+    return resultList
+def addUserID(threads, posts):
+    allUserNameList = set(posts['username'].values)
+    allUserNameList.update(set(threads['username'].values))
+    allUserNameList = list(allUserNameList)
+
+    postUserName =  posts['username'].values
+    postID = []
+    for index in range(0,len(postUserName)):
+        name = postUserName[index]
+        id =  allUserNameList.index(name)
+        postID.append(id)
+
+    threadUserName = threads['username'].values
+    threadID = []
+    for index in range(0, len(threadUserName)):
+        name = threadUserName[index]
+        id = allUserNameList.index(name)
+        threadID.append(id)
+
+    postIDPD = pd.DataFrame(postID, columns=['uid'])
+    threadIDPD = pd.DataFrame(threadID, columns=['uid'])
+
+    threads = pd.concat([threads, threadIDPD], axis=1)
+    posts = pd.concat([posts, postIDPD], axis=1)
+    return (threads, posts)
+
+def top_tfidf_feats(row, features, top_n=25):
+    # ''' Get top n tfidf values in row and return them with their corresponding feature names.'''
+    topn_ids = np.argsort(row)[::-1][:top_n]
+    top_feats = [(features[i], row[i]) for i in topn_ids]
+    df = pd.DataFrame(top_feats)
+    df.columns = ['feature', 'tfidf']
+    return df
+
+def top_mean_feats(Xtr, features, grp_ids=None, min_tfidf=0.1, top_n=25):
+    # ''' Return the top n features that on average are most important amongst documents in rows
+    #     indentified by indices in grp_ids. '''
+    if grp_ids:
+        D = Xtr[grp_ids].toarray()
+    else:
+        D = Xtr.toarray()
+
+    D[D < min_tfidf] = 0
+    tfidf_means = np.mean(D, axis=0)
+    return top_tfidf_feats(tfidf_means, features, top_n)
+
+def top_feats_by_class(Xtr, y, features, min_tfidf=0.1, top_n=25):
+    # ''' Return a list of dfs, where each df holds top_n features and their mean tfidf value
+    #     calculated across documents with the same class label. '''
+    dfs = []
+    labels = np.unique(y)
+    for label in labels:
+        ids = np.where(y==label)
+        feats_df = top_mean_feats(Xtr, features, ids, min_tfidf=min_tfidf, top_n=top_n)
+        feats_df.label = label
+        dfs.append(feats_df)
+    return dfs
+
+def plot_tfidf_classfeats_h(dfs):
+    ''' Plot the data frames returned by the function plot_tfidf_classfeats(). '''
+    fig = plt.figure(figsize=(12, 9), facecolor="w")
+    x = np.arange(len(dfs[0]))
+    for i, df in enumerate(dfs):
+        ax = fig.add_subplot(1, len(dfs), i+1)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.set_frame_on(False)
+        ax.get_xaxis().tick_bottom()
+        ax.get_yaxis().tick_left()
+        ax.set_xlabel("Mean Tf-Idf Score", labelpad=16, fontsize=14)
+        ax.set_title("label = " + str(df.label), fontsize=16)
+        ax.ticklabel_format(axis='x', style='sci', scilimits=(-2,2))
+        ax.barh(x, df.tfidf, align='center', color='#3F5D7D')
+        ax.set_yticks(x)
+        ax.set_ylim([-1, x[-1]+1])
+        yticks = ax.set_yticklabels(df.feature)
+        plt.subplots_adjust(bottom=0.09, right=0.97, left=0.15, top=0.95, wspace=0.52)
+    plt.show()
+
+def main():
+
+    offPostData = readFile(_offPostPath)
+    offThreadData = readFile(_offThreadPath)
+    offURLlabel =  readLabel(_offURLPath)
+
+    # print(offURLlabel)
+    # tmplabel = ([row[1] for row in offURLlabel])
+    # count = Counter(tmplabel)
+    # print(count)
+
+
+    wilderPostData = readFile(_wilderPostPath)
+    wilderThreadData = readFile(_wilderThreadPath)
+    wilderURLLabel = readLabel(_wilderURLPath)
+
+    # tmplabel = ([row[1] for row in wilderURLData])
+    # count = Counter(tmplabel)
+    # print(count)
+
+    (wilderThreadData, wilderPostData) = addUserID(wilderThreadData, wilderPostData)
+    # print(offURLlabel)
+
+    print("offPostData: ", offPostData.shape)
+    print("offThreadData: ", offThreadData.shape)
+
+    print("wilderPostData: ", wilderPostData.shape)
+    print("wilderThreadData: ", wilderThreadData.shape)
+
+    concatListDescriptionLabel = ['count']
+
+    urlStringFeatureLabel = ['urlLength', 'numBackslash', 'booleanWWW', 'classPrefix', 'normalizedUpperCase',
+                             'normalizedNumbers']
+    userFeaturesLabel = ['numTotalPost', 'numTotalthread', 'numIniThread', 'avgThreadEntro', 'numActiveDay',
+                         'avgDayEntro',
+                         'activeLifeTime', 'avgLenPost', 'medLenPost', 'maxLenPost']
+
+    print("---Creating Features---")
+    offFeatureVect,Select_feature_names = createVectorFeature(offPostData,offThreadData,offURLlabel)
+    # offFeatureVect2, Select_feature_names2 = createVectorFeature(wilderPostData, wilderThreadData, wilderURLLabel)
+
+    # offFeatureVect = pd.concat([offFeatureVect,offFeatureVect2])
+
+    tfidfFeatureLabel = Select_feature_names
+
+    offcolname =  list(offFeatureVect.columns.values)
+    # print(Select_feature_names)
+
+    allData = offFeatureVect.iloc[:,4:len(offcolname)]
+    allData  = allData.drop('label', axis=1)
+
+    #drop some features
+    # allData = allData.drop(userFeaturesLabel, axis=1)
+    # allData = allData.drop(tfidfFeatureLabel, axis=1)
+    # allData = allData.drop(urlStringFeatureLabel, axis=1)
+    # allData = allData.drop(concatListDescriptionLabel, axis=1)
+
+
+    #replace nan with mean col
+    allData = allData.apply(lambda x: x.fillna(x.mean()), axis=0)
+
+    # print(list(allData.columns.values))
+
+    allLabel = offFeatureVect['label'].values
+
+    print("---Start Learning Models---")
+
+    classifiers_names = ["Linear Regression","Nearest Neighbors",
+             "Decision Tree", "Neural Net", "Naive Bayes","Linear SVM"]
+
+    classifiers = [
+        linear_model.LinearRegression(),
+        KNeighborsClassifier(5),
+        DecisionTreeClassifier(max_depth=5),
+        MLPClassifier(alpha=1),
+        GaussianNB(),
+        svm.LinearSVC(),
+
+    ]
+
+    print(Counter(allLabel))
+
+    X_train, X_test, y_train, y_test = train_test_split(allData, allLabel, test_size=0.2)
+    # iterate over classifiers
+    for name, clf in zip(classifiers_names, classifiers):
+        print("---",name,"---")
+        model = clf.fit(X_train, y_train)
+        # predictions = model.predict(X_test)
+        # roundpredictions = roundList(predictions)
+        # print metrics.classification_report(y_test, roundpredictions)
+
+        Xpredictions = cross_val_predict(model, allData, allLabel, cv=5)
+        Xroundpredictions = roundList(Xpredictions)
+        print(Counter(Xroundpredictions))
+
+
+
+        print metrics.classification_report(allLabel, Xroundpredictions)
+
+    print("---Penalized-SVM---")
+    clf_3 = SVC(kernel='linear',
+                class_weight='balanced',  # penalize
+                probability=True)
+
+    clf_3.fit(X_train, y_train)
+
+    pred_y_3 = clf_3.predict(allData)
+    Xroundpredictions = roundList(pred_y_3)
+    print(Counter(Xroundpredictions))
+
+    print metrics.classification_report(allLabel, Xroundpredictions)
+
+if __name__ == "__main__":
+    main()
